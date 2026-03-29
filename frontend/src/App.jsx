@@ -98,6 +98,9 @@ export default function App() {
       rlWsRef.current.close();
       rlWsRef.current = null;
     }
+    setFlyPath(null);
+    setCameraMode("orbit");
+    setDriveMetrics(null);
     setRlBusy(true);
     setRlTrail([]);
     setErr(null);
@@ -130,6 +133,12 @@ export default function App() {
         const [col, row] = msg.pos;
         trail.push(toWorld(col, row, msg.elevation_m));
         setRlTrail([...trail]);
+      }
+      if (msg.done === true) {
+        setRlBusy(false);
+        if (rlWsRef.current === ws) {
+          ws.close(1000, "episode_complete");
+        }
       }
     };
     ws.onerror = () => setErr("WebSocket error (is the API running on :8000?)");
@@ -269,7 +278,7 @@ export default function App() {
               Cost overlay
             </label>
 
-            {hasPaths && (
+            {(hasPaths || rlTrail.length >= 2) && (
               <div className="stats">
                 <div className="stats-header">
                   <h3>Path comparison</h3>
@@ -340,7 +349,7 @@ export default function App() {
                   </div>
                 )}
 
-                {insight && (
+                {insight && hasPaths && (
                   <p className="insight">
                     {insight.longer && insight.lowerEnergy
                       ? "The optimized path trades extra distance for lower energy cost \u2014 the tradeoff NASA optimizes for."

@@ -308,3 +308,8 @@ async def rl_episode_ws(ws: WebSocket):
                 break
     except WebSocketDisconnect:
         pass
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass

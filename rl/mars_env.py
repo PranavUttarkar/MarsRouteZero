@@ -36,6 +36,21 @@ class MarsRoverEnv(gym.Env):
     # Episode ends if the rover is in unsurvivable terrain (after a successful move).
     TERMINATE_COST = 0.92
 
+    # Reward alignment with energy-optimized planner:
+    # Planner energy is computed as integral(cost(x) * ds). We approximate this per step
+    # by penalizing mid_cost * distance_m (mid_cost = avg of old/new cell costs).
+    ENERGY_STEP_PENALTY_SCALE = 2.0
+
+    # "Mountain" / "valley" penalties are based on local elevation contrast.
+    # Values are normalized by the elevation range seen in this terrain grid.
+    REL_RIDGE_THRESH_NORM = 0.05   # center above neighbor mean by this fraction -> ridge
+    REL_VALLEY_THRESH_NORM = 0.05  # center below neighbor mean by this fraction -> valley
+    TERRAIN_REL_PENALTY_SCALE = 25.0
+
+    # Extra penalty for steep uphill/downhill transitions during a single move.
+    STEEP_SLOPE_THRESH_DEG = 14.0
+    STEEP_SLOPE_PENALTY_SCALE = 0.003
+
     def __init__(
         self,
         terrain_path: str,
@@ -49,6 +64,14 @@ class MarsRoverEnv(gym.Env):
         self.H = self.grid.height
         self._max_diag = float(np.hypot(self.W, self.H))
         self.random_start_goal = random_start_goal
+
+        # Cache elevation/cost maps so reward shaping can be computed cheaply.
+        # shapes: (H, W)
+        self.cost_map = np.asarray(self.grid.get_costmap_array(), dtype=np.float32)
+        self.elev_map = np.asarray(self.grid.get_elevation_array(), dtype=np.float32)
+        self.elev_min = float(self.elev_map.min())
+        self.elev_max = float(self.elev_map.max())
+        self.elev_range = max(1e-6, self.elev_max - self.elev_min)
 
         patch_cells = self.PATCH_SIZE * self.PATCH_SIZE
         obs_dim = patch_cells + 5
@@ -118,6 +141,12 @@ class MarsRoverEnv(gym.Env):
         dx = np.cos(rad) * step_scale
         dy = np.sin(rad) * step_scale
 
+        old_pos = self.pos.copy()
+        old_col = int(old_pos[0])
+        old_row = int(old_pos[1])
+        old_cost = float(self.cost_map[old_row, old_col])
+        old_elev = float(self.elev_map[old_row, old_col])
+
         phi_old = -float(np.linalg.norm(self.goal - self.pos)) / (self._max_diag + 1e-8)
 
         new_pos = self.pos + np.array([dx, dy], dtype=float)
@@ -126,7 +155,7 @@ class MarsRoverEnv(gym.Env):
         new_pos[1] = np.clip(new_pos[1], pad, self.H - pad - 1)
 
         nrow, ncol = int(new_pos[1]), int(new_pos[0])
-        proposed_cost = self.grid.get_cell_cost(nrow, ncol)
+        proposed_cost = float(self.cost_map[nrow, ncol])
         blocked = proposed_cost >= self.BLOCK_COST
         if blocked:
             new_pos = self.pos.copy()
@@ -136,11 +165,45 @@ class MarsRoverEnv(gym.Env):
         self.step_count += 1
 
         col, row = int(self.pos[0]), int(self.pos[1])
-        cell_cost = self.grid.get_cell_cost(row, col)
+        cell_cost = float(self.cost_map[row, col])
+        cell_elev = float(self.elev_map[row, col])
 
         dist_to_goal = float(np.linalg.norm(self.goal - self.pos))
         phi_new = -dist_to_goal / (self._max_diag + 1e-8)
         dist_norm = dist_to_goal / (self._max_diag + 1e-8)
+
+        meters_per_pixel = float(getattr(self.grid, "meters_per_pixel", 1.0))
+        dist_cells = float(np.linalg.norm(self.pos - old_pos))
+        dist_m = dist_cells * meters_per_pixel
+        dist_scale = dist_m / (self.STEP_SIZE_M + 1e-6)
+        mid_cost = 0.5 * (old_cost + cell_cost)
+
+        # Steep per-step transition penalty (mountain crossings + deep descents).
+        step_slope_deg = float(
+            np.degrees(np.arctan2(abs(cell_elev - old_elev), dist_m + 1e-6))
+        )
+        steep_slope_pen = (
+            self.STEEP_SLOPE_PENALTY_SCALE
+            * max(0.0, step_slope_deg - self.STEEP_SLOPE_THRESH_DEG) ** 2
+            * dist_scale
+        )
+
+        # Local "ridge vs valley" detector: center elevation vs 8-neighbor mean.
+        elev_nb = []
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                rr = int(np.clip(row + dr, 0, self.H - 1))
+                cc = int(np.clip(col + dc, 0, self.W - 1))
+                elev_nb.append(float(self.elev_map[rr, cc]))
+        nb_mean = float(np.mean(elev_nb)) if elev_nb else cell_elev
+        rel_norm = (cell_elev - nb_mean) / self.elev_range
+        ridge_delta = max(0.0, rel_norm - self.REL_RIDGE_THRESH_NORM)
+        valley_delta = max(0.0, -rel_norm - self.REL_VALLEY_THRESH_NORM)
+        terrain_rel_pen = (
+            self.TERRAIN_REL_PENALTY_SCALE * (ridge_delta**2 + valley_delta**2) * dist_scale
+        )
 
         goal_vec = self.goal - self.pos
         gdist = float(np.linalg.norm(goal_vec)) + 1e-8
@@ -160,8 +223,12 @@ class MarsRoverEnv(gym.Env):
         # Only reward "face the goal" when it comes with real progress (potential increased).
         if not blocked and phi_new > phi_old + 1e-5:
             reward += 0.045 * max(0.0, heading_align) * (0.2 + 0.8 * speed_f)
-        reward -= 3.8 * cell_cost
-        reward -= 6.0 * max(0.0, cell_cost - 0.35) ** 2
+        # Energy-aligned penalties:
+        # - Approximate planner energy: integral(cost(x) * ds) ~= mid_cost * dist_m per step.
+        # - Add explicit "ridge/valley" and steep transition penalties from elevation contrast.
+        reward -= self.ENERGY_STEP_PENALTY_SCALE * mid_cost * dist_m
+        reward -= terrain_rel_pen
+        reward -= steep_slope_pen
         reward -= 0.035 * abs(steer)
         reward -= 0.018
         if blocked:

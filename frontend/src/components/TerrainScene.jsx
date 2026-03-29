@@ -1073,8 +1073,8 @@ export default function TerrainScene({
   useEffect(() => {
     const s = internals.current;
     if (!s) return;
-    if (flyPath && pathCurvesRef.current[flyPath]) {
-      const curve = pathCurvesRef.current[flyPath];
+    const curve = flyPath ? pathCurvesRef.current[flyPath] : null;
+    if (flyPath && curve) {
       const pathLengthMeters =
         s.meta && s.yScale != null
           ? computeCurveLengthMeters(curve, s.meta, s.yScale)

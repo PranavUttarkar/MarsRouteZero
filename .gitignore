@@ -21,3 +21,4 @@ checkpoints/
 *.pyd
 *.so
 .DS_Store
+COMPETITION-NARRATIVE.md
