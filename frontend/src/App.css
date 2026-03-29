@@ -213,6 +213,13 @@ button.ghost {
   font-weight: 500;
 }
 
+.stat-sub {
+  display: block;
+  margin-top: 0.12rem;
+  font-size: 0.7rem;
+  color: #8b949e;
+}
+
 .drive-btn {
   font-size: 0.68rem;
   padding: 0.2rem 0.45rem;

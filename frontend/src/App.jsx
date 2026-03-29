@@ -4,7 +4,93 @@ import StoryPanel from "./components/StoryPanel.jsx";
 import DriveHud from "./components/DriveHud.jsx";
 import { getTerrainMeta, planRoute, getRlStatus } from "./api/client.js";
 import { pathTitle, pathShort } from "./utils/pathLabels.js";
+import { planSegmentData, segmentSlopeDegPlan, rlTrailTotalMeters } from "./utils/driveMetrics.js";
 import "./App.css";
+
+function summarizePlan(plan, meta) {
+  if (!plan || !meta || !plan.waypoints?.length) return null;
+  const { segLens, total } = planSegmentData(plan, meta);
+  if (!segLens.length || total <= 0) return null;
+
+  let maxDropM = 0;
+  let maxSlopeDeg = 0;
+  let hazardAccum = 0;
+
+  for (let i = 0; i < plan.waypoints.length - 1; i++) {
+    const e0 = plan.elevations_m[i];
+    const e1 = plan.elevations_m[i + 1];
+    const drop = e0 - e1;
+    if (drop > maxDropM) maxDropM = drop;
+    const slopeDeg = segmentSlopeDegPlan(plan, meta, i);
+    if (slopeDeg > maxSlopeDeg) maxSlopeDeg = slopeDeg;
+    const roughness =
+      Math.abs((plan.elevations_m[i + 2] ?? e1) - 2 * e1 + e0) +
+      Math.abs(e1 - 2 * e0 + (plan.elevations_m[i - 1] ?? e0));
+    const hazard = Math.min(1, slopeDeg / 35 + roughness / 8);
+    hazardAccum += hazard * (segLens[i] || 0);
+  }
+
+  const avgHazard = hazardAccum / total || 0;
+  const riskScore = Math.max(0, Math.min(100, avgHazard * 100));
+  const energyPerKm =
+    plan.energy_score != null && plan.total_distance_m > 1
+      ? plan.energy_score / (plan.total_distance_m / 1000)
+      : null;
+
+  return {
+    totalDistanceM: plan.total_distance_m,
+    energyScore: plan.energy_score,
+    energyPerKm,
+    maxDropM,
+    maxSlopeDeg,
+    riskScore,
+  };
+}
+
+function summarizeRl(trail, meta) {
+  if (!trail || trail.length < 2 || !meta) return null;
+  const totalDistanceM = rlTrailTotalMeters(trail, meta);
+  if (!totalDistanceM) return null;
+
+  let maxDropM = 0;
+  let maxSlopeDeg = 0;
+  let hazardAccum = 0;
+
+  for (let i = 0; i < trail.length - 1; i++) {
+    const a = trail[i];
+    const b = trail[i + 1];
+    const e0 = a.elevM ?? 0;
+    const e1 = b.elevM ?? 0;
+    const drop = e0 - e1;
+    if (drop > maxDropM) maxDropM = drop;
+
+    const mpp = meta.meters_per_pixel;
+    const dx = (b.x - a.x) * mpp;
+    const dz = (b.z - a.z) * mpp;
+    const horiz = Math.hypot(dx, dz);
+    const slopeDeg =
+      horiz > 1e-6 ? (Math.atan2(Math.abs(e1 - e0), horiz) * 180) / Math.PI : 0;
+    if (slopeDeg > maxSlopeDeg) maxSlopeDeg = slopeDeg;
+
+    const ePrev = i > 0 ? trail[i - 1].elevM ?? e0 : e0;
+    const eNext = i < trail.length - 2 ? trail[i + 2].elevM ?? e1 : e1;
+    const roughness =
+      Math.abs(eNext - 2 * e1 + e0) + Math.abs(e1 - 2 * e0 + ePrev);
+    const hazard = Math.min(1, slopeDeg / 35 + roughness / 8);
+    const segLen = Math.hypot(dx, dz, e1 - e0) || 0;
+    hazardAccum += hazard * segLen;
+  }
+
+  const avgHazard = hazardAccum / totalDistanceM || 0;
+  const riskScore = Math.max(0, Math.min(100, avgHazard * 100));
+
+  return {
+    totalDistanceM,
+    maxDropM,
+    maxSlopeDeg,
+    riskScore,
+  };
+}
 
 export default function App() {
   const [mode, setMode] = useState("story");
@@ -183,6 +269,15 @@ export default function App() {
     return { longer, lowerEnergy, a, s };
   }, [paths]);
 
+  const comparison = useMemo(() => {
+    if (!meta) return { astar: null, straight: null, rl: null };
+    return {
+      astar: paths.astar ? summarizePlan(paths.astar, meta) : null,
+      straight: paths.straight ? summarizePlan(paths.straight, meta) : null,
+      rl: rlTrail.length >= 2 ? summarizeRl(rlTrail, meta) : null,
+    };
+  }, [paths, rlTrail, meta]);
+
   const hint = useMemo(() => {
     if (mode === "story") return "";
     if (!start) return "Click the terrain to place a start point";
@@ -300,6 +395,16 @@ export default function App() {
                       <strong>{pathTitle.astar}</strong>{" "}
                       {paths.astar.total_distance_m.toFixed(0)}m &middot; energy{" "}
                       {paths.astar.energy_score.toFixed(1)}
+                      {comparison.astar && (
+                        <span className="stat-sub">
+                          max drop {comparison.astar.maxDropM.toFixed(0)}m &middot; max slope{" "}
+                          {comparison.astar.maxSlopeDeg.toFixed(1)}° &middot; est fuel{" "}
+                          {comparison.astar.energyPerKm != null
+                            ? `${comparison.astar.energyPerKm.toFixed(1)} /km`
+                            : "—"}{" "}
+                          &middot; risk {comparison.astar.riskScore.toFixed(0)}/100
+                        </span>
+                      )}
                     </span>
                     <button
                       type="button"
@@ -319,6 +424,17 @@ export default function App() {
                       <strong>{pathTitle.straight}</strong>{" "}
                       {paths.straight.total_distance_m.toFixed(0)}m &middot; energy{" "}
                       {paths.straight.energy_score.toFixed(1)}
+                      {comparison.straight && (
+                        <span className="stat-sub">
+                          max drop {comparison.straight.maxDropM.toFixed(0)}m &middot; max
+                          slope {comparison.straight.maxSlopeDeg.toFixed(1)}° &middot; est
+                          fuel{" "}
+                          {comparison.straight.energyPerKm != null
+                            ? `${comparison.straight.energyPerKm.toFixed(1)} /km`
+                            : "—"}{" "}
+                          &middot; risk {comparison.straight.riskScore.toFixed(0)}/100
+                        </span>
+                      )}
                     </span>
                     <button
                       type="button"
@@ -335,8 +451,15 @@ export default function App() {
                   <div className="stat-line">
                     <span className="legend-dot" style={{ background: "#ff6b35" }} />
                     <span className="stat-text">
-                      <strong>{pathTitle.rl}</strong> rollout ({rlTrail.length}{" "}
-                      steps)
+                      <strong>{pathTitle.rl}</strong> rollout ({rlTrail.length} steps)
+                      {comparison.rl && (
+                        <span className="stat-sub">
+                          span {comparison.rl.totalDistanceM.toFixed(0)}m &middot; max drop{" "}
+                          {comparison.rl.maxDropM.toFixed(0)}m &middot; max slope{" "}
+                          {comparison.rl.maxSlopeDeg.toFixed(1)}° &middot; risk{" "}
+                          {comparison.rl.riskScore.toFixed(0)}/100
+                        </span>
+                      )}
                     </span>
                     <button
                       type="button"

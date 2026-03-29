@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import {
   metricsAtProgressPlan,
   metricsAtProgressRl,
@@ -10,7 +12,7 @@ import {
 } from "../utils/driveMetrics.js";
 import { pathTitle } from "../utils/pathLabels.js";
 
-const PATH_COLORS = { astar: 0xffffff, straight: 0x00d4ff, rl: 0xff6b35 };
+const PATH_COLORS = { astar: 0x00f6ff, straight: 0xff2dff, rl: 0x39ff14 };
 /** Stronger spherical falloff so the patch reads as sitting on a planet */
 const CURVATURE = 0.00011;
 const WHEEL_RADIUS = 0.48;
@@ -25,12 +27,12 @@ const K_DRAG = 0.038;
  * Baseline drive along the path (m/s²). Gravity adds/subtracts on top of this
  * (downhill faster, uphill slower), rather than this being the only forward push.
  */
-const A_BASELINE = 1.225;
+const A_BASELINE = 0.72;
 /** Tiny assist only if physics nets near zero on extreme edge cases */
 const A_STUCK = 0.35;
-const V_MAX_MPS = 16;
+const V_MAX_MPS = 8.5;
 /** Brisk start so the run does not crawl before physics ramps */
-const V_START_MPS = 1.0;
+const V_START_MPS = 0.55;
 
 /** Tangent in meters per unit u; local only — does not use path length or start–end distance. */
 function tangentComponentsMeters(tan, meta, yScale) {
@@ -98,6 +100,8 @@ function tangentialAccelMps2(tan, meta, yScale, vMps) {
   };
 }
 const FOG_COLOR = 0x4a1a0a;
+const BASE_FOG_DENSITY = 0.00036;
+const DRIVE_FOG_EXTRA = 0.00055;
 /** Exponential smoothing: higher = snappier, lower = more cinematic */
 const FOLLOW_CAM_SMOOTH = 5.2;
 const FOLLOW_LOOK_SMOOTH = 4.5;
@@ -124,6 +128,38 @@ function marsColor(t) {
   return c.set(stops[stops.length - 1][1]);
 }
 
+function fract(x) {
+  return x - Math.floor(x);
+}
+
+function hash2(x, y) {
+  // Deterministic pseudo-random in [0,1).
+  return fract(Math.sin(x * 127.1 + y * 311.7) * 43758.5453123);
+}
+
+function smooth01(t) {
+  return t * t * (3 - 2 * t);
+}
+
+function valueNoise2D(x, y) {
+  // Simple value noise; cheap enough for per-vertex regolith tinting.
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const x1 = x0 + 1;
+  const y1 = y0 + 1;
+  const fx = x - x0;
+  const fy = y - y0;
+  const a = hash2(x0, y0);
+  const b = hash2(x1, y0);
+  const c = hash2(x0, y1);
+  const d = hash2(x1, y1);
+  const ux = smooth01(fx);
+  const uy = smooth01(fy);
+  const ab = a + (b - a) * ux;
+  const cd = c + (d - c) * ux;
+  return ab + (cd - ab) * uy;
+}
+
 function worldY(normH, x, z, yScale) {
   return normH * yScale - (x * x + z * z) * CURVATURE;
 }
@@ -133,22 +169,31 @@ function buildSky(radius) {
   cnv.width = 4;
   cnv.height = 768;
   const ctx = cnv.getContext("2d");
-  const g = ctx.createLinearGradient(0, 0, 0, 768);
-  g.addColorStop(0.0, "#020208");
-  g.addColorStop(0.08, "#05051a");
-  g.addColorStop(0.14, "#0a0a28");
-  g.addColorStop(0.22, "#12122e");
-  g.addColorStop(0.32, "#0c1020");
-  g.addColorStop(0.42, "#080818");
-  g.addColorStop(0.52, "#120c14");
-  g.addColorStop(0.62, "#1a1010");
-  g.addColorStop(0.72, "#2a1810");
-  g.addColorStop(0.82, "#4a2218");
-  g.addColorStop(0.9, "#6a3018");
-  g.addColorStop(0.96, "#884020");
-  g.addColorStop(1.0, "#a05028");
+  // Mars atmosphere-ish gradient: deep violet above, hazy ochre near the horizon.
+  const g = ctx.createLinearGradient(0, 0, 0, cnv.height);
+  g.addColorStop(0.0, "#010108");
+  g.addColorStop(0.10, "#07071d");
+  g.addColorStop(0.20, "#0f0f2c");
+  g.addColorStop(0.35, "#12122c");
+  g.addColorStop(0.48, "#0d0d1f");
+  g.addColorStop(0.60, "#160c14");
+  g.addColorStop(0.70, "#26120f");
+  g.addColorStop(0.80, "#4a2218");
+  g.addColorStop(0.88, "#7a3420");
+  g.addColorStop(0.94, "#a24a22");
+  g.addColorStop(1.0, "#c25a2b");
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, 4, 768);
+
+  // Subtle dust grain; helps break up banding in the sky.
+  const img = ctx.getImageData(0, 0, cnv.width, cnv.height);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const n = (Math.random() - 0.5) * 10;
+    img.data[i] = Math.max(0, Math.min(255, img.data[i] + n));
+    img.data[i + 1] = Math.max(0, Math.min(255, img.data[i + 1] + n * 0.8));
+    img.data[i + 2] = Math.max(0, Math.min(255, img.data[i + 2] + n * 0.6));
+  }
+  ctx.putImageData(img, 0, 0);
   const tex = new THREE.CanvasTexture(cnv);
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
@@ -207,11 +252,131 @@ function buildGround(radius, minY) {
   return m;
 }
 
+function makeTerrainDetailMap(size = 256) {
+  const data = new Uint8Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const n1 = valueNoise2D(x * 0.14, y * 0.14);
+      const n2 = valueNoise2D(x * 0.42 + 27.1, y * 0.42 + 39.7);
+      const n3 = valueNoise2D(x * 1.2 + 101.3, y * 1.2 + 88.2);
+      const grain = 0.52 * n1 + 0.33 * n2 + 0.15 * n3;
+      data[i] = Math.round(Math.min(255, Math.max(0, grain * 255)));
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size, THREE.RedFormat, THREE.UnsignedByteType);
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.needsUpdate = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  return tex;
+}
+
+function makeRoverSurfaceMaps(baseHex, dirtHex, roughBase = 0.9) {
+  const size = 256;
+
+  const cnv = document.createElement("canvas");
+  cnv.width = size;
+  cnv.height = size;
+  const ctx = cnv.getContext("2d");
+  if (!ctx) return { map: null, roughnessMap: null };
+
+  const base = new THREE.Color(baseHex);
+  const dirt = new THREE.Color(dirtHex);
+
+  // Albedo map: metallic base + scratches + dust streaks.
+  ctx.fillStyle = base.getStyle();
+  ctx.fillRect(0, 0, size, size);
+
+  // Scratches (light streaks).
+  ctx.globalAlpha = 0.18;
+  ctx.strokeStyle = "#ffffff";
+  for (let i = 0; i < 2600; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    const len = 10 + Math.random() * 22;
+    const ang = Math.random() * Math.PI;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(ang);
+    ctx.lineWidth = 0.5 + Math.random() * 1.1;
+    ctx.beginPath();
+    ctx.moveTo(-len * 0.5, 0);
+    ctx.lineTo(len * 0.5, 0);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Dustier wear (darker tint) concentrated toward one side.
+  ctx.globalAlpha = 0.35;
+  ctx.fillStyle = dirt.getStyle();
+  for (let i = 0; i < 1800; i++) {
+    const x = (Math.random() * 0.85 + 0.15) * size;
+    const y = Math.random() * size;
+    const w = 0.8 + Math.random() * 4.5;
+    const h = 0.8 + Math.random() * 10;
+    ctx.fillRect(x, y, w, h);
+  }
+
+  ctx.globalAlpha = 1;
+  const map = new THREE.CanvasTexture(cnv);
+  map.colorSpace = THREE.SRGBColorSpace;
+  map.wrapS = THREE.RepeatWrapping;
+  map.wrapT = THREE.RepeatWrapping;
+  map.repeat.set(1, 1);
+
+  // Roughness map: base roughness + subtle texture.
+  const cnvR = document.createElement("canvas");
+  cnvR.width = size;
+  cnvR.height = size;
+  const ctxR = cnvR.getContext("2d");
+  if (!ctxR) return { map, roughnessMap: null };
+
+  const baseR = Math.round(Math.max(0, Math.min(1, roughBase)) * 255);
+  ctxR.fillStyle = `rgb(${baseR},${baseR},${baseR})`;
+  ctxR.fillRect(0, 0, size, size);
+
+  // Make scratches smoother (lower roughness).
+  ctxR.globalAlpha = 0.55;
+  ctxR.fillStyle = `rgb(${Math.round(baseR * 0.45)},${Math.round(baseR * 0.45)},${Math.round(baseR * 0.45)})`;
+  for (let i = 0; i < 1200; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    const r = 0.5 + Math.random() * 2.2;
+    ctxR.beginPath();
+    ctxR.arc(x, y, r, 0, Math.PI * 2);
+    ctxR.fill();
+  }
+
+  // Dust increases roughness a bit.
+  ctxR.globalAlpha = 0.32;
+  ctxR.fillStyle = `rgb(255,255,255)`;
+  for (let i = 0; i < 900; i++) {
+    const x = (Math.random() * 0.85 + 0.15) * size;
+    const y = Math.random() * size;
+    const w = 1 + Math.random() * 6;
+    const h = 1 + Math.random() * 10;
+    ctxR.fillRect(x, y, w, h);
+  }
+
+  ctxR.globalAlpha = 1;
+  const roughnessMap = new THREE.CanvasTexture(cnvR);
+  roughnessMap.colorSpace = THREE.NoColorSpace;
+  roughnessMap.wrapS = THREE.RepeatWrapping;
+  roughnessMap.wrapT = THREE.RepeatWrapping;
+  roughnessMap.repeat.set(1, 1);
+
+  return { map, roughnessMap };
+}
+
 function buildDust(halfExtent, count) {
   const pos = new Float32Array(count * 3);
   for (let i = 0; i < count; i++) {
     pos[i * 3] = (Math.random() - 0.5) * halfExtent * 2;
-    pos[i * 3 + 1] = Math.random() * 55 + 2;
+    // Keep dust low and dense around the horizon for a more Mars-like haze.
+    pos[i * 3 + 1] = Math.random() * 22 + 0.6;
     pos[i * 3 + 2] = (Math.random() - 0.5) * halfExtent * 2;
   }
   const geo = new THREE.BufferGeometry();
@@ -220,9 +385,9 @@ function buildDust(halfExtent, count) {
     geo,
     new THREE.PointsMaterial({
       color: 0xd0a878,
-      size: 1.0,
+      size: 0.78,
       transparent: true,
-      opacity: 0.15,
+      opacity: 0.12,
       sizeAttenuation: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
@@ -239,12 +404,24 @@ function buildRover() {
   const chassis = new THREE.Group();
   root.add(chassis);
 
+  const bodyMaps = makeRoverSurfaceMaps(0xb8a898, 0x6a3a1a, 0.82);
+  const wheelMaps = makeRoverSurfaceMaps(0x1a1a1a, 0x2a140c, 0.95);
+
   const bodyMat = new THREE.MeshStandardMaterial({
-    color: 0xb8a898,
-    roughness: 0.88,
+    map: bodyMaps.map ?? undefined,
+    roughnessMap: bodyMaps.roughnessMap ?? undefined,
+    roughness: 0.9,
     metalness: 0.06,
+    color: bodyMaps.map ? 0xffffff : 0xb8a898,
   });
-  const darkMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.92 });
+
+  const darkMat = new THREE.MeshStandardMaterial({
+    map: wheelMaps.map ?? undefined,
+    roughnessMap: wheelMaps.roughnessMap ?? undefined,
+    roughness: 0.98,
+    metalness: 0.02,
+    color: wheelMaps.map ? 0xffffff : 0x1a1a1a,
+  });
   const foilMat = new THREE.MeshStandardMaterial({
     color: 0xc9a85c,
     roughness: 0.42,
@@ -264,18 +441,31 @@ function buildRover() {
   rocker.position.set(0, 0.4, 0);
   chassis.add(rocker);
 
-  const wGeo = new THREE.CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, 0.2, 20);
+  const wGeo = new THREE.CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, 0.22, 28);
   wGeo.rotateX(Math.PI / 2);
 
   const wheels = [];
+  const bogies = [];
   const sx = [-1.05, 0, 1.05];
   const sz = [1.02, -1.02];
   sx.forEach((x) => {
     sz.forEach((z) => {
+      const bogie = new THREE.Group();
+      const arm = new THREE.Mesh(
+        new THREE.BoxGeometry(0.26, 0.12, 0.32),
+        darkMat
+      );
+      arm.position.set(0, WHEEL_RADIUS * 0.3, 0);
+      bogie.add(arm);
+
       const w = new THREE.Mesh(wGeo, darkMat);
-      w.position.set(x, WHEEL_RADIUS - 0.06, z);
-      chassis.add(w);
+      w.position.set(0, WHEEL_RADIUS - 0.02, 0);
+      bogie.add(w);
+
+      bogie.position.set(x, 0, z);
+      chassis.add(bogie);
       wheels.push(w);
+      bogies.push(bogie);
     });
   });
 
@@ -289,11 +479,35 @@ function buildRover() {
   const head = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.22, 0.42), foilMat);
   head.position.set(-0.95, 3.05, 0);
   chassis.add(head);
+  const lensL = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.06, 0.06, 0.08, 14),
+    new THREE.MeshStandardMaterial({ color: 0x101820, metalness: 0.65, roughness: 0.25 })
+  );
+  lensL.rotation.z = Math.PI / 2;
+  lensL.position.set(-1.12, 3.07, -0.08);
+  chassis.add(lensL);
+  const lensR = lensL.clone();
+  lensR.position.z = 0.08;
+  chassis.add(lensR);
 
   const hga = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 0.04, 20), foilMat);
   hga.position.set(0.85, 1.35, -0.95);
   hga.rotation.x = Math.PI / 2.3;
   chassis.add(hga);
+
+  const solar = new THREE.Mesh(
+    new THREE.BoxGeometry(1.8, 0.08, 1.1),
+    new THREE.MeshStandardMaterial({ color: 0x2f343b, roughness: 0.55, metalness: 0.35 })
+  );
+  solar.position.set(0.25, 1.08, 0);
+  chassis.add(solar);
+
+  const antennaBase = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.2, 12), mastMat);
+  antennaBase.position.set(1.2, 1.46, 0.58);
+  chassis.add(antennaBase);
+  const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.016, 1.05, 10), mastMat);
+  antenna.position.set(1.2, 1.98, 0.58);
+  chassis.add(antenna);
 
   const rtg = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 1.0, 10), darkMat);
   rtg.position.set(1.15, 1.05, 0);
@@ -308,34 +522,72 @@ function buildRover() {
 
 function buildBeacon(hex) {
   const g = new THREE.Group();
-  const beamH = 30;
+  const beamH = 34;
+  const core = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.22, 0.3, 2.2, 16),
+    new THREE.MeshStandardMaterial({
+      color: 0x121822,
+      roughness: 0.45,
+      metalness: 0.78,
+      emissive: hex,
+      emissiveIntensity: 0.15,
+    })
+  );
+  core.position.y = 1.1;
+  g.add(core);
+
   const beam = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.1, 0.1, beamH, 6),
+    new THREE.CylinderGeometry(0.13, 0.22, beamH, 18, 1, true),
     new THREE.MeshBasicMaterial({
       color: hex,
       transparent: true,
-      opacity: 0.45,
+      opacity: 0.24,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    })
+  );
+  beam.position.y = beamH / 2 + 0.8;
+  g.add(beam);
+
+  const ringA = new THREE.Mesh(
+    new THREE.TorusGeometry(2.2, 0.07, 12, 48),
+    new THREE.MeshBasicMaterial({ color: hex, transparent: true, opacity: 0.9 })
+  );
+  ringA.rotation.x = -Math.PI / 2;
+  ringA.position.y = 0.28;
+  ringA.userData.pulse = "ringA";
+  g.add(ringA);
+
+  const ringB = new THREE.Mesh(
+    new THREE.TorusGeometry(1.45, 0.05, 10, 40),
+    new THREE.MeshBasicMaterial({ color: hex, transparent: true, opacity: 0.65 })
+  );
+  ringB.rotation.x = -Math.PI / 2;
+  ringB.position.y = 0.45;
+  ringB.userData.pulse = "ringB";
+  g.add(ringB);
+
+  const halo = new THREE.Mesh(
+    new THREE.SphereGeometry(0.65, 16, 16),
+    new THREE.MeshBasicMaterial({
+      color: hex,
+      transparent: true,
+      opacity: 0.18,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
     })
   );
-  beam.position.y = beamH / 2;
-  g.add(beam);
-
-  const ring = new THREE.Mesh(
-    new THREE.TorusGeometry(2, 0.2, 8, 28),
-    new THREE.MeshBasicMaterial({ color: hex, transparent: true, opacity: 0.7 })
-  );
-  ring.rotation.x = -Math.PI / 2;
-  ring.position.y = 0.3;
-  ring.userData.pulse = true;
-  g.add(ring);
+  halo.position.y = 1.1;
+  halo.userData.pulse = "halo";
+  g.add(halo);
 
   const dot = new THREE.Mesh(
-    new THREE.SphereGeometry(0.7, 10, 10),
-    new THREE.MeshStandardMaterial({ color: hex, emissive: hex, emissiveIntensity: 0.6 })
+    new THREE.OctahedronGeometry(0.34, 1),
+    new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: hex, emissiveIntensity: 1.25 })
   );
-  dot.position.y = 0.7;
+  dot.position.y = 1.1;
+  dot.userData.pulse = "dot";
   g.add(dot);
 
   g.visible = false;
@@ -347,8 +599,23 @@ function dispose3D(o) {
   o.traverse((ch) => {
     if (ch.geometry) ch.geometry.dispose();
     if (ch.material) {
-      if (Array.isArray(ch.material)) ch.material.forEach((m) => m.dispose());
-      else ch.material.dispose();
+      const mats = Array.isArray(ch.material) ? ch.material : [ch.material];
+      mats.forEach((m) => {
+        if (!m) return;
+        // Dispose textures too (CanvasTexture/DataTexture/etc), to avoid slow GPU memory growth.
+        [
+          "map",
+          "roughnessMap",
+          "metalnessMap",
+          "bumpMap",
+          "normalMap",
+          "emissiveMap",
+          "aoMap",
+        ].forEach((k) => {
+          if (m[k] && typeof m[k].dispose === "function") m[k].dispose();
+        });
+        m.dispose();
+      });
     }
   });
 }
@@ -386,6 +653,7 @@ export default function TerrainScene({
     pathLengthMeters: 0,
   });
   const pathCurvesRef = useRef({});
+  const lastUserOrbitAtRef = useRef(0);
   const showCostmapRef = useRef(showCostmap);
   const onPickRef = useRef(onPick);
   const flyPathRef = useRef(flyPath);
@@ -419,7 +687,9 @@ export default function TerrainScene({
     const halfH = gridH / 2;
 
     const scene = new THREE.Scene();
-    scene.fog = new THREE.Fog(FOG_COLOR, 420, 3200);
+    scene.background = new THREE.Color(0x060105);
+    // Exponential haze looks closer to Mars dust scattering than linear fog.
+    scene.fog = new THREE.FogExp2(FOG_COLOR, BASE_FOG_DENSITY);
 
     const followSmooth = {
       active: false,
@@ -429,12 +699,14 @@ export default function TerrainScene({
     };
     let planetSkirt = null;
 
-    const camera = new THREE.PerspectiveCamera(50, w / h, 0.3, 6000);
+    // Larger far plane so an expanded ground plane can render.
+    const camera = new THREE.PerspectiveCamera(50, w / h, 0.3, 300000);
     camera.position.set(halfW * 0.55, yScale * 1.5, halfH * 0.75);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(w, h);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x060105, 1);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.1;
@@ -442,7 +714,11 @@ export default function TerrainScene({
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.06;
+    controls.dampingFactor = 0.085;
+    controls.rotateSpeed = 0.65;
+    controls.zoomSpeed = 0.85;
+    controls.panSpeed = 0.9;
+    controls.enablePan = true;
     controls.maxPolarAngle = Math.PI * 0.48;
     controls.minDistance = 8;
     controls.maxDistance = 1600;
@@ -450,11 +726,21 @@ export default function TerrainScene({
     controls.autoRotate = autoRotateRef.current;
     controls.autoRotateSpeed = 0.35;
 
-    const hemi = new THREE.HemisphereLight(0xd08050, 0x1a0a06, 0.5);
+    controls.addEventListener("start", () => {
+      lastUserOrbitAtRef.current = performance.now();
+    });
+
+    const composer = new EffectComposer(renderer);
+    composer.addPass(new RenderPass(scene, camera));
+    // No bloom: avoid any extra highlight amplification on terrain.
+    composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    composer.setSize(w, h);
+
+    const hemi = new THREE.HemisphereLight(0xd08050, 0x1a0a06, 0.4);
     scene.add(hemi);
-    scene.add(new THREE.AmbientLight(0x6a5040, 0.25));
-    const sun = new THREE.DirectionalLight(0xfff0d8, 1.35);
-    sun.position.set(200, 300, 150);
+    scene.add(new THREE.AmbientLight(0x6a5040, 0.2));
+    const sun = new THREE.DirectionalLight(0xfff0d8, 1.05);
+    sun.position.set(200, 210, 120);
     scene.add(sun);
     const fill = new THREE.DirectionalLight(0x7090b0, 0.18);
     fill.position.set(-100, 80, -150);
@@ -462,61 +748,14 @@ export default function TerrainScene({
 
     const sky = buildSky(3200);
     scene.add(sky);
-    const ground = buildGround(2200);
+    // Make the base plane vastly larger so the horizon reads continuous.
+    const ground = buildGround(2200 * 500);
     scene.add(ground);
-    const dust = buildDust(halfW * 1.2, 900);
+    const dust = buildDust(halfW * 1.2, 1200);
     scene.add(dust);
 
-    const starGeo = new THREE.BufferGeometry();
-    const nStars = 4500;
-    const starPos = new Float32Array(nStars * 3);
-    const starSizes = new Float32Array(nStars);
-    for (let i = 0; i < nStars; i++) {
-      const r = 2600 + Math.random() * 2400;
-      const th = Math.random() * Math.PI * 2;
-      const ph = Math.acos(2 * Math.random() - 1);
-      const upBias = Math.pow(Math.random(), 0.45);
-      const ph2 = ph * (0.35 + upBias * 0.65);
-      starPos[i * 3] = r * Math.sin(ph2) * Math.cos(th);
-      starPos[i * 3 + 1] = r * Math.cos(ph2) + 180 + Math.random() * 400;
-      starPos[i * 3 + 2] = r * Math.sin(ph2) * Math.sin(th);
-      starSizes[i] = 0.6 + Math.random() * 1.8;
-    }
-    starGeo.setAttribute("position", new THREE.BufferAttribute(starPos, 3));
-    starGeo.setAttribute("size", new THREE.BufferAttribute(starSizes, 1));
-    const starMat = new THREE.ShaderMaterial({
-      uniforms: {
-        uColor: { value: new THREE.Color(0xc8d8ff) },
-        uOpacity: { value: 0.55 },
-      },
-      vertexShader: `
-        attribute float size;
-        varying float vBright;
-        void main() {
-          vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-          vBright = 0.35 + 0.65 * smoothstep(-800.0, 2200.0, position.y);
-          gl_PointSize = size * (420.0 / -mvPosition.z);
-          gl_Position = projectionMatrix * mvPosition;
-        }
-      `,
-      fragmentShader: `
-        uniform vec3 uColor;
-        uniform float uOpacity;
-        varying float vBright;
-        void main() {
-          vec2 c = gl_PointCoord - vec2(0.5);
-          float a = 1.0 - smoothstep(0.35, 0.5, length(c));
-          if (a < 0.01) discard;
-          gl_FragColor = vec4(uColor * vBright, a * uOpacity * vBright);
-        }
-      `,
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      fog: false,
-    });
-    const stars = new THREE.Points(starGeo, starMat);
-    scene.add(stars);
+    // No star field; we want a clean atmospheric sky without point light noise.
+    const stars = null;
 
     const pathGroup = new THREE.Group();
     scene.add(pathGroup);
@@ -563,6 +802,11 @@ export default function TerrainScene({
     loader.load(
       "/api/heightmap.png",
       (tex) => {
+        // Height map is a geometric signal, not color.
+        tex.colorSpace = THREE.NoColorSpace;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+
         const img = tex.image;
         const cnv = document.createElement("canvas");
         const ctx = cnv.getContext("2d");
@@ -582,6 +826,45 @@ export default function TerrainScene({
         }
         if (internals.current) internals.current.heightMap = hm;
 
+        // Roughness map from DEM Laplacian -> more micro-contrast on rough regolith.
+        const rough8 = new Uint8Array(gridW * gridH);
+        const lapScale = 2.0;
+        for (let row = 0; row < gridH; row++) {
+          const rUp = Math.max(0, row - 1);
+          const rDn = Math.min(gridH - 1, row + 1);
+          for (let col = 0; col < gridW; col++) {
+            const cLf = Math.max(0, col - 1);
+            const cRt = Math.min(gridW - 1, col + 1);
+            const i = row * gridW + col;
+            const hC = hm[i];
+            const lap =
+              hm[row * gridW + cLf] +
+              hm[row * gridW + cRt] +
+              hm[rUp * gridW + col] +
+              hm[rDn * gridW + col] -
+              4 * hC;
+            const micro = Math.abs(lap) * lapScale;
+            // Keep terrain matte; avoid accidental glossy speckles.
+            const rough = Math.min(0.995, Math.max(0.82, 0.9 + micro));
+            rough8[i] = Math.round(rough * 255);
+          }
+        }
+        const roughTex = new THREE.DataTexture(
+          rough8,
+          gridW,
+          gridH,
+          THREE.RedFormat,
+          THREE.UnsignedByteType
+        );
+        roughTex.colorSpace = THREE.NoColorSpace;
+        roughTex.flipY = true; // match the same row indexing used for picking
+        roughTex.needsUpdate = true;
+        roughTex.minFilter = THREE.LinearFilter;
+        roughTex.magFilter = THREE.LinearFilter;
+        roughTex.generateMipmaps = false;
+        const detailTex = makeTerrainDetailMap(256);
+        detailTex.repeat.set(Math.max(8, gridW / 18), Math.max(8, gridH / 18));
+
         const geo = new THREE.PlaneGeometry(gridW, gridH, gridW - 1, gridH - 1);
         geo.rotateX(-Math.PI / 2);
         const pos = geo.attributes.position;
@@ -596,21 +879,35 @@ export default function TerrainScene({
           const normH = data[(yi * img.width + xi) * 4] / 255;
           const px = pos.getX(i);
           const pz = pos.getZ(i);
-          pos.setY(i, worldY(normH, px, pz, yScale));
+          const rockN = valueNoise2D(px * 0.11 + 5.1, pz * 0.11 - 2.7) - 0.5;
+          const sandN = valueNoise2D(px * 0.035 - 21.0, pz * 0.035 + 18.4);
+          const roughMask = Math.min(1, Math.max(0, Math.abs(rockN) * 1.8));
+          const microRelief = rockN * (0.42 + 0.52 * roughMask) + (sandN - 0.5) * 0.18;
+          pos.setY(i, worldY(normH, px, pz, yScale) + microRelief);
           const mc = marsColor(normH);
-          colors[i * 3] = mc.r;
-          colors[i * 3 + 1] = mc.g;
-          colors[i * 3 + 2] = mc.b;
+          // Procedural regolith tinting: sandy flats + darker rocky patches.
+          const n1 = valueNoise2D(px * 0.015, pz * 0.015);
+          const n2 = valueNoise2D(px * 0.055, pz * 0.055);
+          const rocky = Math.min(1, Math.max(0, (n2 - 0.45) * 1.9));
+          const sandy = 1 - rocky;
+          const dust = 0.84 + 0.2 * n1;
+          const crust = 0.9 + 0.15 * Math.pow(normH, 0.7);
+          const rockDark = 0.8 + 0.08 * n2;
+          const sandLift = 0.98 + 0.08 * n1;
+          const tone = crust * dust * (rockDark * rocky + sandLift * sandy);
+          colors[i * 3] = mc.r * tone;
+          colors[i * 3 + 1] = mc.g * tone;
+          colors[i * 3 + 2] = mc.b * tone;
         }
         pos.needsUpdate = true;
         geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
         geo.computeVertexNormals();
 
-        const mat = new THREE.MeshStandardMaterial({
+        // Use a purely diffuse material so the surface never reads as glossy,
+        // even under strong directional light.
+        const mat = new THREE.MeshLambertMaterial({
           vertexColors: true,
-          roughness: 0.92,
-          metalness: 0.03,
-          flatShading: false,
+          emissive: 0x000000,
         });
         terrainMesh = new THREE.Mesh(geo, mat);
         scene.add(terrainMesh);
@@ -678,6 +975,7 @@ export default function TerrainScene({
       camera.aspect = rw / rh;
       camera.updateProjectionMatrix();
       renderer.setSize(rw, rh);
+      composer.setSize(rw, rh);
     };
     window.addEventListener("resize", onResize);
 
@@ -685,6 +983,7 @@ export default function TerrainScene({
     clock.start();
 
     const metricAcc = { acc: 0, lastD: 0, lastClock: performance.now() };
+    let driveFog = 0;
 
     const tick = () => {
       animFrameRef.current = requestAnimationFrame(tick);
@@ -692,6 +991,10 @@ export default function TerrainScene({
       const elapsed = clock.elapsedTime;
 
       controls.autoRotate = autoRotateRef.current;
+
+      // Re-center the giant base plane under camera so it reads as endless.
+      ground.position.x = camera.position.x;
+      ground.position.z = camera.position.z;
 
       dust.rotation.y += dt * 0.01;
       dust.position.x = Math.sin(elapsed * 0.07) * 5;
@@ -701,8 +1004,19 @@ export default function TerrainScene({
         if (!b.visible) return;
         b.traverse((ch) => {
           if (ch.userData.pulse) {
-            const s = 1 + 0.2 * Math.sin(elapsed * 3.5);
-            ch.scale.set(s, s, 1);
+            const tag = ch.userData.pulse;
+            if (tag === "ringA") {
+              const s = 1 + 0.25 * Math.sin(elapsed * 3.2);
+              ch.scale.set(s, s, 1);
+            } else if (tag === "ringB") {
+              const s = 1 + 0.18 * Math.sin(elapsed * 4.2 + 0.8);
+              ch.scale.set(s, s, 1);
+            } else if (tag === "halo") {
+              ch.material.opacity = 0.12 + 0.12 * (0.5 + 0.5 * Math.sin(elapsed * 2.8));
+            } else if (tag === "dot") {
+              ch.material.emissiveIntensity = 0.9 + 0.55 * (0.5 + 0.5 * Math.sin(elapsed * 5.0));
+              ch.rotation.y += 0.02;
+            }
           }
         });
       });
@@ -845,7 +1159,21 @@ export default function TerrainScene({
         followSmooth.active = false;
       }
 
-      if (cameraModeRef.current === "follow" && ra.active && ra.curve) {
+      const wantFollowCam = cameraModeRef.current === "follow" && ra.active && ra.curve;
+      const userRecently = performance.now() - lastUserOrbitAtRef.current < 850;
+
+      // Fog / dust ramp when driving with follow camera, for a more cinematic Mars haze.
+      const fogTarget = wantFollowCam ? 1 : 0;
+      const fogK = 2.5;
+      driveFog += (fogTarget - driveFog) * (1 - Math.exp(-fogK * Math.min(dt, 0.08)));
+      if (scene.fog && "density" in scene.fog) {
+        scene.fog.density = BASE_FOG_DENSITY + DRIVE_FOG_EXTRA * driveFog;
+      }
+      if (dust.material && "opacity" in dust.material) {
+        dust.material.opacity = 0.08 + 0.14 * driveFog;
+      }
+
+      if (wantFollowCam) {
         const t = Math.min(ra.progress, 1);
         const u = Math.min(Math.max(t, 0), 0.9995);
         const pt = ra.curve.getPointAt(u);
@@ -856,6 +1184,7 @@ export default function TerrainScene({
         const lookTarget = pt.clone().add(tan.multiplyScalar(14));
         lookTarget.y = pt.y + 3.5;
 
+        const shouldAutoAlign = !followSmooth.active || t < 0.015 || !userRecently;
         if (!followSmooth.active || t < 0.015) {
           followSmooth.camPos.copy(camDest);
           followSmooth.lookAt.copy(lookTarget);
@@ -864,17 +1193,17 @@ export default function TerrainScene({
           followSmooth.camPos.lerp(camDest, exp(FOLLOW_CAM_SMOOTH));
           followSmooth.lookAt.lerp(lookTarget, exp(FOLLOW_LOOK_SMOOTH));
         }
-        camera.position.copy(followSmooth.camPos);
-        camera.lookAt(followSmooth.lookAt);
         controls.target.lerp(pt, exp(6));
-        controls.enabled = false;
+        if (shouldAutoAlign) {
+          camera.position.copy(followSmooth.camPos);
+          camera.lookAt(followSmooth.lookAt);
+        }
       } else {
         followSmooth.active = false;
-        controls.enabled = true;
       }
 
       controls.update();
-      renderer.render(scene, camera);
+      composer.render();
     };
     tick();
 
@@ -893,6 +1222,7 @@ export default function TerrainScene({
       dispose3D(hazardGroup);
       controls.dispose();
       renderer.dispose();
+      composer.dispose?.();
       if (renderer.domElement.parentNode === el) el.removeChild(renderer.domElement);
       internals.current = null;
     };
@@ -1006,15 +1336,12 @@ export default function TerrainScene({
       const segs = Math.min(640, Math.max(96, pts.length * 32));
       pg.add(
         new THREE.Mesh(
-          new THREE.TubeGeometry(curve, segs, 0.2, 8, false),
-          new THREE.MeshStandardMaterial({
+          new THREE.TubeGeometry(curve, segs, 0.1, 8, false),
+          new THREE.MeshBasicMaterial({
             color: colorHex,
-            emissive: colorHex,
-            emissiveIntensity: 0.22,
             transparent: true,
-            opacity: 0.82,
-            roughness: 0.35,
-            metalness: 0.15,
+            opacity: 0.96,
+            toneMapped: false,
           })
         )
       );
@@ -1030,15 +1357,12 @@ export default function TerrainScene({
       const segs = Math.min(720, Math.max(120, pts.length * 6));
       pg.add(
         new THREE.Mesh(
-          new THREE.TubeGeometry(curve, segs, 0.16, 8, false),
-          new THREE.MeshStandardMaterial({
+          new THREE.TubeGeometry(curve, segs, 0.08, 8, false),
+          new THREE.MeshBasicMaterial({
             color: PATH_COLORS.rl,
-            emissive: PATH_COLORS.rl,
-            emissiveIntensity: 0.28,
             transparent: true,
-            opacity: 0.8,
-            roughness: 0.38,
-            metalness: 0.12,
+            opacity: 0.96,
+            toneMapped: false,
           })
         )
       );
