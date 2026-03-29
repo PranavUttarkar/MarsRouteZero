@@ -1,6 +1,22 @@
 {
   "width": 512,
   "height": 512,
-  "meters_per_pixel": 1.0,
-  "description": "Synthetic height field for Mars Route Zero dev builds"
+  "meters_per_pixel": 20.88600089972676,
+  "description": "Resampled from HiRISE controlled DTM COG (Mars Route Zero)",
+  "elevation_min_m": -2678.850830078125,
+  "elevation_max_m": -2390.447509765625,
+  "crs": "PROJCS[\"Mars (2015) - Sphere / Ocentric / Equirectangular, clon = 0\",GEOGCS[\"Mars (2015) - Sphere / Ocentric\",DATUM[\"Mars (2015) - Sphere\",SPHEROID[\"Mars (2015) - Sphere\",3396190,0,AUTHORITY[\"IAU\",\"49900\"]],AUTHORITY[\"IAU\",\"49900\"]],PRIMEM[\"Reference Meridian\",0,AUTHORITY[\"IAU\",\"49900\"]],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]],AUTHORITY[\"IAU\",\"49900\"]],PROJECTION[\"Equirectangular\"],PARAMETER[\"standard_parallel_1\",0],PARAMETER[\"central_meridian\",0],PARAMETER[\"false_easting\",0],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"Easting\",EAST],AXIS[\"Northing\",NORTH],AUTHORITY[\"IAU\",\"49910\"]]",
+  "source_geotiff": "data/dtm/aws_sync/DTEEC_045994_1985_046060_1985_U01.tif",
+  "source_shape": [
+    14175,
+    6864
+  ],
+  "geotransform_source": [
+    1.0165533020257713,
+    0.0,
+    4586874.845967728,
+    0.0,
+    -1.0165533020257713,
+    1099451.5897741036
+  ]
 }

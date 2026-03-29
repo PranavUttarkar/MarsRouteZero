@@ -1,9 +1,8 @@
 {
-  "label": "Illustrative traverse (grid coordinates on synthetic Jezero — replace with JPL lat/lon for competition)",
+  "label": "Illustrative Perseverance-style traverse (curved path on grid — replace with JPL lat/lon for competition)",
   "points": [
-    { "col": 180, "row": 120 },
-    { "col": 220, "row": 155 },
-    { "col": 260, "row": 190 },
-    { "col": 300, "row": 220 }
+    { "col": 155, "row": 310 },
+    { "col": 248, "row": 255 },
+    { "col": 340, "row": 195 }
   ]
 }

@@ -145,8 +145,8 @@ RL Training (offline, pre-hackathon):
 
 ### 4.1 Primary Dataset: HiRISE Jezero Crater DTM Mosaic
 
-**Source:** NASA/USGS via AWS Open Data Registry  
-**URL:** `s3://nasa-usgs-mars-hirise-dtms/` (public, no auth required)  
+**Source:** NASA/USGS via [AWS Open Data Registry — Released HiRISE DTMs](https://registry.opendata.aws/nasa-usgs-mars-hirise-dtms/)  
+**S3 (no auth):** `s3://astrogeo-ard/mars/mro/hirise/controlled/dtm/` — **ARN** `arn:aws:s3:::astrogeo-ard/mars/mro/hirise/controlled/dtm` — **region `us-west-2`** (`--no-sign-request`)  
 **Format:** Cloud Optimized GeoTIFF (COG), 32-bit float elevation in meters  
 **Resolution:** 1 m/pixel post-spacing  
 **Coverage:** Full Jezero Crater landing ellipse (lat 18.3°–18.7°N, lon 77.2°–77.6°E)  
@@ -163,8 +163,14 @@ Jezero_W:  DTEEC_037396_1985_042315_1985       (western approach)
 
 **Pre-processing pipeline (run before hackathon):**
 ```bash
-# Download COG tiles
-aws s3 sync s3://nasa-usgs-mars-hirise-dtms/jezero/ ./data/dtm/ --no-sign-request
+# List stereo-pair folders under controlled DTMs
+aws s3 ls s3://astrogeo-ard/mars/mro/hirise/controlled/dtm/ --no-sign-request --region us-west-2
+
+# Download one Jezero-relevant product (or use scripts/download_jezero_dtm.* with defaults)
+aws s3 sync s3://astrogeo-ard/mars/mro/hirise/controlled/dtm/ESP_045994_1985_ESP_046060_1985/ ./data/dtm/aws_sync --no-sign-request --region us-west-2
+
+# Fast path (one COG, no GDAL CLI): resample to 512×512 float32 + jezero_meta.json
+python3 scripts/hirise_geotiff_to_elevation_bin.py --input data/dtm/aws_sync/DTEEC_045994_1985_046060_1985_U01.tif
 
 # Merge mosaic
 gdal_merge.py -o jezero_mosaic.tif data/dtm/DTEEC_*_1985*.tif

@@ -9,7 +9,7 @@ Living checklist vs `mars-route-zero-prd.md`.
 | Area | Status |
 |------|--------|
 | C++ `libmars` | Done — binary, slope, costmap, A*, tests, pybind, `dll_windows.py` |
-| Real NASA DTM | **Scripts added** — `scripts/download_jezero_dtm.sh`, `preprocess_terrain.py`, `export_geotransform.py`; production assets still manual |
+| Real NASA DTM | **In pipeline** — `download_jezero_dtm.*` (astrogeo-ard), `hirise_geotiff_to_elevation_bin.py` → `jezero_elevation.bin` + `jezero_meta.json`; API reads `meters_per_pixel` from meta unless `MARS_METERS_PER_PIXEL` is set |
 | RL training | **Done** — `train.py` (PPO, `--tensorboard` optional) |
 | RL HPO | **Done** — `optimize.py` (Optuna, optional SQLite storage) |
 | ONNX export | **Done** — `python -m rl.export_onnx` → `frontend/public/mars_policy.onnx` |
@@ -24,6 +24,7 @@ Living checklist vs `mars-route-zero-prd.md`.
 | Task | Command |
 |------|---------|
 | Synthetic terrain | `python scripts/gen_synthetic_terrain.py` |
+| HiRISE COG → app grid | `python scripts/hirise_geotiff_to_elevation_bin.py --input data/dtm/aws_sync/DTEEC_*.tif` |
 | Train PPO | `PYTHONPATH=build python -m rl.train --smoke` |
 | Optuna HPO | `PYTHONPATH=build python -m rl.optimize --trials 8` |
 | Export ONNX | `python -m rl.export_onnx` |
@@ -34,7 +35,7 @@ Living checklist vs `mars-route-zero-prd.md`.
 
 ## Not done / stretch (PRD Phase 5)
 
-- [ ] Real HiRISE mosaic in-repo (Git LFS / hosted binary).
+- [ ] Multi-tile HiRISE Jezero mosaic (optional; single-tile real DTM path works).
 - [ ] AI4MARS terrain class overlay.
 - [ ] Elevation **cross-section** chart (D3/Chart.js).
 - [ ] RL **value heatmap** overlay.

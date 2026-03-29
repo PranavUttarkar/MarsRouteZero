@@ -64,7 +64,25 @@ _TERRAIN_PATH = Path(
     os.environ.get("MARS_ELEVATION_BIN", _ROOT / "data/costmap/jezero_elevation.bin")
 )
 _GRID = int(os.environ.get("MARS_GRID_SIZE", "512"))
-_MPP = float(os.environ.get("MARS_METERS_PER_PIXEL", "1.0"))
+
+
+def _meters_per_pixel() -> float:
+    env = os.environ.get("MARS_METERS_PER_PIXEL", "").strip()
+    if env:
+        return float(env)
+    meta_path = _ROOT / "data/dtm/jezero_meta.json"
+    if meta_path.is_file():
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+            m = data.get("meters_per_pixel")
+            if isinstance(m, (int, float)) and m > 0:
+                return float(m)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return 1.0
+
+
+_MPP = _meters_per_pixel()
 
 if not _TERRAIN_PATH.is_file():
     raise FileNotFoundError(
@@ -230,7 +248,7 @@ def _load_ppo():
 @app.websocket("/ws/rl-episode")
 async def rl_episode_ws(ws: WebSocket):
     """Stream rover steps: PPO if `models/mars_ppo_latest.zip` (or MARS_PPO_PATH) exists, else heuristic."""
-    from backend.rollout import heuristic_action, predict_action
+    from backend.rollout import blended_action, heuristic_action
     from rl.mars_env import MarsRoverEnv
 
     await ws.accept()
@@ -264,9 +282,10 @@ async def rl_episode_ws(ws: WebSocket):
             }
         )
 
+        rng = np.random.default_rng()
         for step in range(1, max_steps + 1):
             if model is not None:
-                action = predict_action(model, obs)
+                action = blended_action(model, env, obs, rng=rng)
             else:
                 action = heuristic_action(env)
             obs, _reward, terminated, truncated, info = env.step(action)

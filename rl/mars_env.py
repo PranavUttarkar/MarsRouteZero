@@ -29,6 +29,12 @@ class MarsRoverEnv(gym.Env):
     GOAL_RADIUS = 3
     STEP_SIZE_M = 2.0
     HEADING_LIMIT = 30.0
+    # Match PPO gamma so potential-based shaping does not distort the objective (Ng et al.).
+    GAMMA_SHAPING = 0.99
+    # Moves into cells at/above this cost are rejected (stay put, penalty) — discourages rim-loops into craters.
+    BLOCK_COST = 0.78
+    # Episode ends if the rover is in unsurvivable terrain (after a successful move).
+    TERMINATE_COST = 0.92
 
     def __init__(
         self,
@@ -41,6 +47,7 @@ class MarsRoverEnv(gym.Env):
         self.grid = libmars.build_full_terrain(terrain_path, grid_size, grid_size, mpp)
         self.W = self.grid.width
         self.H = self.grid.height
+        self._max_diag = float(np.hypot(self.W, self.H))
         self.random_start_goal = random_start_goal
 
         patch_cells = self.PATCH_SIZE * self.PATCH_SIZE
@@ -59,8 +66,8 @@ class MarsRoverEnv(gym.Env):
         self.goal = np.array([self.W * 3 // 4, self.H * 3 // 4], dtype=float)
         self.heading_deg = 0.0
         self.step_count = 0
-        self.prev_dist = np.linalg.norm(self.goal - self.pos)
         self.trajectory = [self.pos.copy()]
+        self._visited: set[tuple[int, int]] = set()
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -94,25 +101,35 @@ class MarsRoverEnv(gym.Env):
 
         self.heading_deg = float(options.get("heading_deg", 0.0))
         self.step_count = 0
-        self.prev_dist = np.linalg.norm(self.goal - self.pos)
         self.trajectory = [self.pos.copy()]
+        self._visited = set()
         return self._get_obs(), {}
 
     def step(self, action):
-        delta_h = float(action[0]) * self.HEADING_LIMIT
-        speed_f = float(action[1])
+        steer = float(np.clip(action[0], -1.0, 1.0))
+        speed_f = float(np.clip(action[1], 0.0, 1.0))
+        delta_h = steer * self.HEADING_LIMIT
 
         self.heading_deg += delta_h
         self.heading_deg = self.heading_deg % 360.0
 
         rad = np.deg2rad(self.heading_deg)
-        dx = np.cos(rad) * self.STEP_SIZE_M * (0.3 + 0.7 * speed_f)
-        dy = np.sin(rad) * self.STEP_SIZE_M * (0.3 + 0.7 * speed_f)
+        step_scale = self.STEP_SIZE_M * (0.3 + 0.7 * speed_f)
+        dx = np.cos(rad) * step_scale
+        dy = np.sin(rad) * step_scale
 
-        new_pos = self.pos + np.array([dx, dy])
+        phi_old = -float(np.linalg.norm(self.goal - self.pos)) / (self._max_diag + 1e-8)
+
+        new_pos = self.pos + np.array([dx, dy], dtype=float)
         pad = self.PATCH_SIZE // 2
         new_pos[0] = np.clip(new_pos[0], pad, self.W - pad - 1)
         new_pos[1] = np.clip(new_pos[1], pad, self.H - pad - 1)
+
+        nrow, ncol = int(new_pos[1]), int(new_pos[0])
+        proposed_cost = self.grid.get_cell_cost(nrow, ncol)
+        blocked = proposed_cost >= self.BLOCK_COST
+        if blocked:
+            new_pos = self.pos.copy()
 
         self.pos = new_pos
         self.trajectory.append(self.pos.copy())
@@ -121,13 +138,34 @@ class MarsRoverEnv(gym.Env):
         col, row = int(self.pos[0]), int(self.pos[1])
         cell_cost = self.grid.get_cell_cost(row, col)
 
-        dist_to_goal = np.linalg.norm(self.goal - self.pos)
-        progress = (self.prev_dist - dist_to_goal) / max(self.prev_dist, 1.0)
-        self.prev_dist = dist_to_goal
+        dist_to_goal = float(np.linalg.norm(self.goal - self.pos))
+        phi_new = -dist_to_goal / (self._max_diag + 1e-8)
+        dist_norm = dist_to_goal / (self._max_diag + 1e-8)
 
-        reward = progress * 10.0
-        reward -= cell_cost * 2.0
-        reward -= 0.01
+        goal_vec = self.goal - self.pos
+        gdist = float(np.linalg.norm(goal_vec)) + 1e-8
+        gdir = goal_vec / gdist
+        hdir = np.array([np.cos(rad), np.sin(rad)], dtype=np.float64)
+        heading_align = float(np.dot(gdir, hdir))
+
+        reward = 0.0
+        # Potential-based shaping toward goal (γ matches PPO; no net gain from a pure spatial loop).
+        if not blocked:
+            reward += self.GAMMA_SHAPING * phi_new - phi_old
+            # Discourage figure-eights: cheap terrain cannot pay for covering the same cells repeatedly.
+            cell_key = (row, col)
+            if cell_key in self._visited:
+                reward -= 0.028
+            self._visited.add(cell_key)
+        # Only reward "face the goal" when it comes with real progress (potential increased).
+        if not blocked and phi_new > phi_old + 1e-5:
+            reward += 0.045 * max(0.0, heading_align) * (0.2 + 0.8 * speed_f)
+        reward -= 3.8 * cell_cost
+        reward -= 6.0 * max(0.0, cell_cost - 0.35) ** 2
+        reward -= 0.035 * abs(steer)
+        reward -= 0.018
+        if blocked:
+            reward -= 0.55
 
         terminated = False
         truncated = False
@@ -135,11 +173,11 @@ class MarsRoverEnv(gym.Env):
         if dist_to_goal < self.GOAL_RADIUS:
             reward += 100.0
             terminated = True
-        elif cell_cost >= 0.85:
-            reward -= 20.0
+        elif cell_cost >= self.TERMINATE_COST:
+            reward -= 25.0
             terminated = True
         elif self.step_count >= self.MAX_STEPS:
-            reward -= 10.0
+            reward -= 10.0 + 12.0 * dist_norm
             truncated = True
 
         return (

@@ -39,9 +39,10 @@ def main() -> None:
 
     def objective(trial: optuna.Trial) -> float:
         lr = trial.suggest_float("learning_rate", 1e-5, 3e-3, log=True)
-        ent = trial.suggest_float("ent_coef", 0.0, 0.04)
-        clip = trial.suggest_float("clip_range", 0.1, 0.3)
+        ent = trial.suggest_float("ent_coef", 0.0, 0.012)
+        clip = trial.suggest_float("clip_range", 0.1, 0.22)
         n_steps = trial.suggest_categorical("n_steps", [512, 1024, 2048])
+        gamma = trial.suggest_float("gamma", 0.985, 0.997)
 
         def make_env():
             return MarsRoverEnv(str(args.terrain), args.grid, args.mpp, random_start_goal=True)
@@ -53,11 +54,12 @@ def main() -> None:
             learning_rate=lr,
             n_steps=n_steps,
             batch_size=min(256, n_steps),
-            n_epochs=6,
-            gamma=0.995,
-            gae_lambda=0.95,
+            n_epochs=10,
+            gamma=gamma,
+            gae_lambda=0.92,
             clip_range=clip,
             ent_coef=ent,
+            max_grad_norm=0.5,
             policy_kwargs=dict(net_arch=[256, 256, 128]),
             verbose=0,
             tensorboard_log=None,

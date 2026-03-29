@@ -1,12 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import TerrainScene from "./components/TerrainScene.jsx";
 import StoryPanel from "./components/StoryPanel.jsx";
-import {
-  getTerrainMeta,
-  planRoute,
-  getRlStatus,
-  getPerseveranceWaypoints,
-} from "./api/client.js";
+import DriveHud from "./components/DriveHud.jsx";
+import { getTerrainMeta, planRoute, getRlStatus } from "./api/client.js";
+import { pathTitle, pathShort } from "./utils/pathLabels.js";
 import "./App.css";
 
 export default function App() {
@@ -21,7 +18,10 @@ export default function App() {
   const [rlTrail, setRlTrail] = useState([]);
   const [rlBusy, setRlBusy] = useState(false);
   const [showCostmap, setShowCostmap] = useState(false);
-  const [perseverancePoints, setPerseverancePoints] = useState([]);
+  const [cameraMode, setCameraMode] = useState("orbit");
+  const [flyPath, setFlyPath] = useState(null);
+  const [driveMetrics, setDriveMetrics] = useState(null);
+  const rlWsRef = useRef(null);
 
   useEffect(() => {
     getTerrainMeta()
@@ -30,9 +30,15 @@ export default function App() {
     getRlStatus()
       .then(setRlStatus)
       .catch(() => {});
-    getPerseveranceWaypoints()
-      .then((w) => setPerseverancePoints(w.points || []))
-      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (rlWsRef.current) {
+        rlWsRef.current.close();
+        rlWsRef.current = null;
+      }
+    };
   }, []);
 
   const onTerrainPick = useCallback(
@@ -88,22 +94,37 @@ export default function App() {
 
   const streamRl = useCallback(async () => {
     if (!start || !goal || !meta) return;
+    if (rlWsRef.current) {
+      rlWsRef.current.close();
+      rlWsRef.current = null;
+    }
     setRlBusy(true);
     setRlTrail([]);
     setErr(null);
-    const yScale = Math.max(12, meta.elevation_range_m * 0.85);
+    const yScale = Math.min(160, Math.max(14, meta.elevation_range_m * 0.55));
     const er = meta.elevation_range_m + 1e-9;
-    const toWorld = (col, row, elevM) => ({
-      x: col - meta.width / 2,
-      z: row - meta.height / 2,
-      y: ((elevM - meta.elevation_min) / er) * yScale + 1.2,
-    });
+    const CURVATURE = 0.00011;
+    const toWorld = (col, row, elevM) => {
+      const x = col - meta.width / 2;
+      const z = row - meta.height / 2;
+      const normH = (elevM - meta.elevation_min) / er;
+      return {
+        x,
+        z,
+        y: normH * yScale - (x * x + z * z) * CURVATURE + 1.5,
+        elevM,
+        col,
+        row,
+      };
+    };
 
     const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${wsProto}//${window.location.host}/ws/rl-episode`);
+    rlWsRef.current = ws;
 
     const trail = [];
     ws.onmessage = (ev) => {
+      if (rlWsRef.current !== ws) return;
       const msg = JSON.parse(ev.data);
       if (msg.pos && msg.elevation_m != null) {
         const [col, row] = msg.pos;
@@ -112,7 +133,10 @@ export default function App() {
       }
     };
     ws.onerror = () => setErr("WebSocket error (is the API running on :8000?)");
-    ws.onclose = () => setRlBusy(false);
+    ws.onclose = () => {
+      if (rlWsRef.current === ws) rlWsRef.current = null;
+      setRlBusy(false);
+    };
     ws.onopen = () => {
       ws.send(
         JSON.stringify({
@@ -122,6 +146,24 @@ export default function App() {
       );
     };
   }, [start, goal, meta]);
+
+  const startDrive = useCallback(
+    (pathName) => {
+      setCameraMode("follow");
+      setFlyPath(pathName);
+    },
+    []
+  );
+
+  const onFlyComplete = useCallback(() => {
+    setFlyPath(null);
+    setCameraMode("orbit");
+    setDriveMetrics(null);
+  }, []);
+
+  const onDriveMetrics = useCallback((m) => {
+    setDriveMetrics(m);
+  }, []);
 
   const insight = useMemo(() => {
     if (!paths?.astar || !paths?.straight) return null;
@@ -134,10 +176,19 @@ export default function App() {
 
   const hint = useMemo(() => {
     if (mode === "story") return "";
-    if (!start) return "Click terrain: start";
-    if (!goal) return "Click terrain: goal";
-    return "Plan paths or stream RL";
+    if (!start) return "Click the terrain to place a start point";
+    if (!goal) return "Click again to place the goal";
+    return "Run planners or drive the rover";
   }, [mode, start, goal]);
+
+  const hasPaths = paths.astar || paths.straight;
+
+  const activePlanForDrive = useMemo(() => {
+    if (!flyPath || flyPath === "rl") return null;
+    if (flyPath === "astar") return paths.astar;
+    if (flyPath === "straight") return paths.straight;
+    return null;
+  }, [flyPath, paths]);
 
   return (
     <div className="app">
@@ -150,113 +201,235 @@ export default function App() {
             <button
               type="button"
               className="ghost"
-              onClick={() => setMode("story")}
+              onClick={() => {
+                if (rlWsRef.current) {
+                  rlWsRef.current.close();
+                  rlWsRef.current = null;
+                }
+                setRlBusy(false);
+                setMode("story");
+                setCameraMode("orbit");
+                setFlyPath(null);
+                setDriveMetrics(null);
+              }}
             >
-              ← Story
+              &larr; Story
             </button>
-            <p className="hint">{hint}</p>
+
+            <p className="explore-thesis">
+              Same HiRISE grid for every run: compare how far each path goes and
+              how much energy it costs — that tradeoff is what rover ops wrestle
+              with daily.
+            </p>
+
+            <p className="hint step-hint">{hint}</p>
+
             {start && (
-              <p className="mono">
-                Start: {start.col}, {start.row}
-              </p>
+              <div className="marker-row">
+                <span className="marker-dot start-dot" />
+                <span className="marker-label">
+                  Start ({start.col}, {start.row})
+                </span>
+              </div>
             )}
             {goal && (
-              <p className="mono">
-                Goal: {goal.col}, {goal.row}
-              </p>
+              <div className="marker-row">
+                <span className="marker-dot goal-dot" />
+                <span className="marker-label">
+                  Goal ({goal.col}, {goal.row})
+                </span>
+              </div>
             )}
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={showCostmap}
-                onChange={(e) => setShowCostmap(e.target.checked)}
-              />
-              Cost overlay (traversal heat)
-            </label>
+
             <div className="row">
               <button
                 type="button"
                 disabled={!start || !goal || loading}
                 onClick={runPlans}
               >
-                {loading ? "Planning…" : "A* + straight"}
+                {loading
+                  ? "Planning\u2026"
+                  : "Plan optimized vs shortest path"}
               </button>
               <button
                 type="button"
                 disabled={!start || !goal || rlBusy}
                 onClick={streamRl}
               >
-                {rlBusy ? "RL…" : "Stream RL"}
+                {rlBusy ? "Streaming\u2026" : "Stream RL"}
               </button>
             </div>
+
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={showCostmap}
+                onChange={(e) => setShowCostmap(e.target.checked)}
+              />
+              Cost overlay
+            </label>
+
+            {hasPaths && (
+              <div className="stats">
+                <div className="stats-header">
+                  <h3>Path comparison</h3>
+                  <button
+                    type="button"
+                    className="cam-toggle"
+                    onClick={() =>
+                      setCameraMode((m) => (m === "orbit" ? "follow" : "orbit"))
+                    }
+                  >
+                    {cameraMode === "orbit" ? "Follow cam" : "Orbit cam"}
+                  </button>
+                </div>
+
+                {paths.astar && (
+                  <div className="stat-line">
+                    <span className="legend-dot" style={{ background: "#ffffff" }} />
+                    <span className="stat-text">
+                      <strong>{pathTitle.astar}</strong>{" "}
+                      {paths.astar.total_distance_m.toFixed(0)}m &middot; energy{" "}
+                      {paths.astar.energy_score.toFixed(1)}
+                    </span>
+                    <button
+                      type="button"
+                      className="drive-btn"
+                      disabled={flyPath != null}
+                      onClick={() => startDrive("astar")}
+                    >
+                      Drive
+                    </button>
+                  </div>
+                )}
+
+                {paths.straight && (
+                  <div className="stat-line">
+                    <span className="legend-dot" style={{ background: "#00d4ff" }} />
+                    <span className="stat-text">
+                      <strong>{pathTitle.straight}</strong>{" "}
+                      {paths.straight.total_distance_m.toFixed(0)}m &middot; energy{" "}
+                      {paths.straight.energy_score.toFixed(1)}
+                    </span>
+                    <button
+                      type="button"
+                      className="drive-btn"
+                      disabled={flyPath != null}
+                      onClick={() => startDrive("straight")}
+                    >
+                      Drive
+                    </button>
+                  </div>
+                )}
+
+                {rlTrail.length >= 2 && (
+                  <div className="stat-line">
+                    <span className="legend-dot" style={{ background: "#ff6b35" }} />
+                    <span className="stat-text">
+                      <strong>{pathTitle.rl}</strong> rollout ({rlTrail.length}{" "}
+                      steps)
+                    </span>
+                    <button
+                      type="button"
+                      className="drive-btn"
+                      disabled={flyPath != null}
+                      onClick={() => startDrive("rl")}
+                    >
+                      Drive
+                    </button>
+                  </div>
+                )}
+
+                {insight && (
+                  <p className="insight">
+                    {insight.longer && insight.lowerEnergy
+                      ? "The optimized path trades extra distance for lower energy cost \u2014 the tradeoff NASA optimizes for."
+                      : insight.lowerEnergy
+                        ? "The physics- and energy-optimized path beats the shortest segment line on energy."
+                        : "Steeper terrain raises energy even when the shortest path looks temptingly direct."}
+                  </p>
+                )}
+              </div>
+            )}
+
             <button
               type="button"
               className="ghost"
               onClick={() => {
+                if (rlWsRef.current) {
+                  rlWsRef.current.close();
+                  rlWsRef.current = null;
+                }
+                setRlBusy(false);
                 setStart(null);
                 setGoal(null);
                 setPaths({ astar: null, straight: null });
                 setRlTrail([]);
+                setFlyPath(null);
+                setCameraMode("orbit");
+                setDriveMetrics(null);
               }}
             >
               Clear picks
             </button>
+
             {rlStatus && (
               <p className="small muted">
                 Policy:{" "}
-                {rlStatus.ppo_zip_exists ? "PPO zip found" : "heuristic only"} · ONNX{" "}
-                {rlStatus.onnx_exists ? "ok" : "run export_onnx"}
+                {rlStatus.ppo_zip_exists ? "PPO found" : "heuristic"} &middot;
+                ONNX {rlStatus.onnx_exists ? "ok" : "not exported"}
               </p>
-            )}
-            {paths.astar && (
-              <div className="stats">
-                <h3>Comparison</h3>
-                <p>
-                  A* — distance {paths.astar.total_distance_m.toFixed(1)} m · energy{" "}
-                  {paths.astar.energy_score.toFixed(1)}
-                </p>
-                <p>
-                  Straight — distance {paths.straight.total_distance_m.toFixed(1)} m · energy{" "}
-                  {paths.straight.energy_score.toFixed(1)}
-                </p>
-                {insight && (
-                  <p className="insight">
-                    {insight.longer && insight.lowerEnergy
-                      ? "A* is longer in distance but can use less energy on this pair — the tradeoff NASA cares about."
-                      : insight.lowerEnergy
-                        ? "A* scores lower energy here than a straight chord across the cost field."
-                        : "Compare visually: steeper cells raise energy even when the path looks shorter in map view."}
-                  </p>
-                )}
-              </div>
             )}
             {err && <p className="err">{err}</p>}
           </>
         )}
       </aside>
       <main className="scene-wrap">
-        {meta && mode === "explore" && (
+        {meta && (
           <TerrainScene
             meta={meta}
-            paths={paths}
-            rlTrail={rlTrail}
-            perseverancePoints={perseverancePoints}
-            showCostmap={showCostmap}
+            paths={mode === "explore" ? paths : { astar: null, straight: null }}
+            rlTrail={mode === "explore" ? rlTrail : []}
+            showCostmap={mode === "explore" && showCostmap}
             onPick={onTerrainPick}
-            pickEnabled
+            pickEnabled={mode === "explore"}
+            startPos={mode === "explore" ? start : null}
+            goalPos={mode === "explore" ? goal : null}
+            cameraMode={cameraMode}
+            flyPath={flyPath}
+            onFlyComplete={onFlyComplete}
+            onDriveMetrics={onDriveMetrics}
+            activePlan={activePlanForDrive}
+            rlTrailSamples={mode === "explore" ? rlTrail : []}
+            autoRotate={mode === "story"}
           />
         )}
-        {meta && mode === "story" && (
-          <TerrainScene
-            meta={meta}
-            paths={{ astar: null, straight: null }}
-            rlTrail={[]}
-            perseverancePoints={perseverancePoints}
-            showCostmap={false}
-            pickEnabled={false}
-          />
+        {!meta && !err && <div className="loading">Loading terrain\u2026</div>}
+        <DriveHud metrics={driveMetrics} />
+        {flyPath && (
+          <div className="fly-overlay">
+            <span className="fly-label">
+              Driving{" "}
+              {flyPath === "astar"
+                ? pathShort.astar
+                : flyPath === "straight"
+                  ? pathShort.straight
+                  : pathShort.rl}{" "}
+              path\u2026
+            </span>
+            <button
+              type="button"
+              className="fly-stop"
+              onClick={() => {
+                setFlyPath(null);
+                setCameraMode("orbit");
+                setDriveMetrics(null);
+              }}
+            >
+              Stop
+            </button>
+          </div>
         )}
-        {!meta && !err && <div className="loading">Loading terrain…</div>}
       </main>
     </div>
   );

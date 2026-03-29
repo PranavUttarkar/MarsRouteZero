@@ -98,7 +98,13 @@ Writes **`frontend/public/mars_policy.onnx`**. The UI includes `onnxruntime-web`
 - **`scripts/preprocess_terrain.py`** — crop with `gdal_translate` (needs GDAL).
 - **`scripts/export_geotransform.py`** — GeoTIFF → JSON metadata (needs Python GDAL bindings).
 
-Dev builds continue to use **`scripts/gen_synthetic_terrain.py`**.
+Dev builds continue to use **`scripts/gen_synthetic_terrain.py`** (requires NumPy). After changing the script or when the terrain looks like an old test pattern, regenerate the binary and **restart the API** so `/api/heightmap.png` and `libmars` reload:
+
+```bash
+python scripts/gen_synthetic_terrain.py
+```
+
+Production Jezero data: follow **`scripts/download_jezero_dtm.sh`** and **`scripts/preprocess_terrain.py`** plus PRD §4.1, then point **`MARS_ELEVATION_BIN`** at the new float32 grid.
 
 ## Tests
 
