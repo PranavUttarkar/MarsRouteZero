@@ -27,3 +27,7 @@ jobs:
       - name: Python import libmars
         run: |
           PYTHONPATH=build python3 -c "import libmars; g=libmars.build_full_terrain('data/costmap/jezero_elevation.bin',512,512,1.0); print(g.width, g.height)"
+      - name: Pytest MarsRoverEnv
+        run: |
+          pip3 install pytest gymnasium
+          PYTHONPATH=build python3 -m pytest tests/test_env.py -v

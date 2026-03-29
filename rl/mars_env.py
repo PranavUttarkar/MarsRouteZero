@@ -1,9 +1,20 @@
 """Gymnasium environment wrapping libmars (build C++ extension first)."""
 from __future__ import annotations
 
-import numpy as np
+import sys
+from pathlib import Path
+
 import gymnasium as gym
+import numpy as np
 from gymnasium import spaces
+
+_RL_ROOT = Path(__file__).resolve().parents[1]
+if str(_RL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_RL_ROOT))
+
+from dll_windows import ensure_mingw_dll_dirs
+
+ensure_mingw_dll_dirs(_RL_ROOT)
 
 import libmars
 
@@ -53,7 +64,16 @@ class MarsRoverEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        if self.random_start_goal:
+        options = options or {}
+        # Fixed start/goal (e.g. WebSocket demo): col, row order matches planner / libmars
+        if "start_col" in options and "goal_col" in options:
+            self.pos = np.array(
+                [float(options["start_col"]), float(options["start_row"])], dtype=float
+            )
+            self.goal = np.array(
+                [float(options["goal_col"]), float(options["goal_row"])], dtype=float
+            )
+        elif self.random_start_goal:
             margin = self.PATCH_SIZE
             rng = self.np_random
             while True:
@@ -72,7 +92,7 @@ class MarsRoverEnv(gym.Env):
         else:
             self._reset_state()
 
-        self.heading_deg = 0.0
+        self.heading_deg = float(options.get("heading_deg", 0.0))
         self.step_count = 0
         self.prev_dist = np.linalg.norm(self.goal - self.pos)
         self.trajectory = [self.pos.copy()]

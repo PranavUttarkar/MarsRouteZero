@@ -108,7 +108,7 @@ Path AStarPlanner::plan(const TerrainGrid& grid, GridPoint start, GridPoint goal
         int cur_i = idx(cur.r, cur.c, W);
         float cur_g = g_score[cur_i];
 
-        if (cur.r == goal.row && cur.col == goal.col) {
+        if (cur.r == goal.row && cur.c == goal.col) {
             goal_i = cur_i;
             break;
         }

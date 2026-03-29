@@ -5,11 +5,34 @@ import os
 import sys
 from pathlib import Path
 
+_REPO = Path(__file__).resolve().parents[1]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from dll_windows import ensure_mingw_dll_dirs
+
+ensure_mingw_dll_dirs(_REPO)
+
+import asyncio
+import json
+from io import BytesIO
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 
-_ROOT = Path(__file__).resolve().parents[1]
+try:
+    from PIL import Image
+except ImportError:
+    Image = None  # type: ignore[misc, assignment]
+
+try:
+    from stable_baselines3 import PPO as SB3PPO
+except ImportError:
+    SB3PPO = None  # type: ignore[misc, assignment]
+
+_ROOT = _REPO
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
@@ -25,7 +48,17 @@ for _extra in (
 
 import numpy as np
 
-import libmars
+try:
+    import libmars
+except ImportError as e:
+    if sys.platform == "win32" and "DLL load failed" in str(e):
+        raise ImportError(
+            "libmars could not load its MinGW runtime DLLs. Install MSYS2 UCRT64 and set "
+            "MSYS2_UCRT64_BIN to the ucrt64\\\\bin directory, or add that folder to PATH, "
+            "then restart. Build output (libmars*.pyd) must be on PYTHONPATH — e.g. "
+            "set PYTHONPATH to the CMake build directory."
+        ) from e
+    raise
 
 _TERRAIN_PATH = Path(
     os.environ.get("MARS_ELEVATION_BIN", _ROOT / "data/costmap/jezero_elevation.bin")
@@ -77,6 +110,7 @@ class PlanRequest(BaseModel):
 
 class PlanResponse(BaseModel):
     waypoints: list[list[int]]
+    elevations_m: list[float]
     total_cost: float
     total_distance_m: float
     energy_score: float
@@ -91,8 +125,10 @@ async def plan_route(req: PlanRequest):
         path = libmars.astar_plan(TERRAIN, start, goal)
     else:
         path = libmars.straight_line(TERRAIN, start, goal)
+    elev_m = [float(ELEV[p.row, p.col]) for p in path.waypoints]
     return PlanResponse(
         waypoints=[[p.col, p.row] for p in path.waypoints],
+        elevations_m=elev_m,
         total_cost=float(path.total_cost),
         total_distance_m=float(path.total_distance_m),
         energy_score=float(path.energy_score),
@@ -110,18 +146,146 @@ async def get_costmap_tile(row: int, col: int, size: int = 64):
     return {"data": tile, "r0": r0, "c0": c0, "rows": r1 - r0, "cols": c1 - c0}
 
 
+@app.get("/api/rl-status")
+async def rl_status():
+    """Whether a PPO checkpoint is available for WebSocket / optional ONNX."""
+    path = Path(os.environ.get("MARS_PPO_PATH", _ROOT / "models" / "mars_ppo_latest.zip"))
+    onnx_path = _ROOT / "frontend" / "public" / "mars_policy.onnx"
+    return {
+        "ppo_zip_exists": path.is_file(),
+        "ppo_zip_path": str(path) if path.is_file() else None,
+        "onnx_exists": onnx_path.is_file(),
+        "stable_baselines3": SB3PPO is not None,
+    }
+
+
+@app.get("/api/perseverance-waypoints")
+async def perseverance_waypoints():
+    """Sample / manual waypoints for overlay (replace with real JPL traverse when available)."""
+    wp_path = _ROOT / "data" / "perseverance" / "waypoints.json"
+    if not wp_path.is_file():
+        return {"label": "", "points": []}
+    data = json.loads(wp_path.read_text(encoding="utf-8"))
+    out = []
+    for p in data.get("points", []):
+        r, c = int(p["row"]), int(p["col"])
+        if 0 <= r < TERRAIN.height and 0 <= c < TERRAIN.width:
+            q = {**p, "elevation_m": float(ELEV[r, c])}
+            out.append(q)
+    return {"label": data.get("label", ""), "points": out}
+
+
+@app.get("/api/costmap.png")
+async def costmap_png():
+    """Grayscale PNG of traversal cost [0,1] for terrain overlay."""
+    if Image is None:
+        raise RuntimeError("Install Pillow: pip install pillow")
+    c = np.asarray(COST, dtype=np.float64)
+    arr = (np.clip(c, 0.0, 1.0) * 255.0).astype(np.uint8)
+    im = Image.fromarray(arr, mode="L")
+    buf = BytesIO()
+    im.save(buf, format="PNG")
+    return Response(content=buf.getvalue(), media_type="image/png")
+
+
+@app.get("/api/heightmap.png")
+async def heightmap_png():
+    """Grayscale PNG (normalized elevation) for Three.js displacement / texture."""
+    if Image is None:
+        raise RuntimeError("Install Pillow: pip install pillow")
+    e = np.asarray(ELEV, dtype=np.float64)
+    lo, hi = float(e.min()), float(e.max())
+    g = (e - lo) / (hi - lo + 1e-12)
+    arr = (np.clip(g, 0.0, 1.0) * 255.0).astype(np.uint8)
+    im = Image.fromarray(arr, mode="L")
+    buf = BytesIO()
+    im.save(buf, format="PNG")
+    return Response(content=buf.getvalue(), media_type="image/png")
+
+
+@app.get("/api/cell")
+async def cell_query(row: int, col: int):
+    """Single-cell terrain stats for hover / tooltips."""
+    if row < 0 or row >= TERRAIN.height or col < 0 or col >= TERRAIN.width:
+        return {"error": "out of bounds"}
+    return {
+        "row": row,
+        "col": col,
+        "elevation_m": float(ELEV[row, col]),
+        "slope_deg": float(SLOPE[row, col]),
+        "cost": float(COST[row, col]),
+    }
+
+
+def _load_ppo():
+    path = Path(os.environ.get("MARS_PPO_PATH", _ROOT / "models" / "mars_ppo_latest.zip"))
+    if SB3PPO is None or not path.is_file():
+        return None
+    try:
+        return SB3PPO.load(str(path))
+    except Exception:
+        return None
+
+
 @app.websocket("/ws/rl-episode")
 async def rl_episode_ws(ws: WebSocket):
-    """Placeholder: full ONNX episode streaming comes after training (PRD §7)."""
+    """Stream rover steps: PPO if `models/mars_ppo_latest.zip` (or MARS_PPO_PATH) exists, else heuristic."""
+    from backend.rollout import heuristic_action, predict_action
+    from rl.mars_env import MarsRoverEnv
+
     await ws.accept()
+    max_steps = int(os.environ.get("MARS_RL_WS_MAX_STEPS", "800"))
+    delay_s = float(os.environ.get("MARS_RL_WS_DELAY", "0.05"))
     try:
-        await ws.receive_json()
+        msg = await ws.receive_json()
+        start_col, start_row = int(msg["start"][0]), int(msg["start"][1])
+        goal_col, goal_row = int(msg["goal"][0]), int(msg["goal"][1])
+
+        env = MarsRoverEnv(str(_TERRAIN_PATH), _GRID, _MPP, random_start_goal=False)
+        obs, _ = env.reset(
+            options={
+                "start_col": start_col,
+                "start_row": start_row,
+                "goal_col": goal_col,
+                "goal_row": goal_row,
+            }
+        )
+        model = _load_ppo()
+        r0, c0 = int(start_row), int(start_col)
         await ws.send_json(
             {
                 "step": 0,
-                "error": "RL WebSocket stub — train policy and wire onnxruntime (see PRD).",
-                "done": True,
+                "pos": [float(start_col), float(start_row)],
+                "elevation_m": float(ELEV[r0, c0]),
+                "cost": float(env.grid.get_cell_cost(start_row, start_col)),
+                "dist": float(np.linalg.norm(env.goal - env.pos)),
+                "done": False,
+                "policy": "ppo" if model is not None else "heuristic",
             }
         )
+
+        for step in range(1, max_steps + 1):
+            if model is not None:
+                action = predict_action(model, obs)
+            else:
+                action = heuristic_action(env)
+            obs, _reward, terminated, truncated, info = env.step(action)
+            pos = info["pos"]
+            ri, ci = int(pos[1]), int(pos[0])
+            ri = max(0, min(TERRAIN.height - 1, ri))
+            ci = max(0, min(TERRAIN.width - 1, ci))
+            await ws.send_json(
+                {
+                    "step": step,
+                    "pos": [float(pos[0]), float(pos[1])],
+                    "elevation_m": float(ELEV[ri, ci]),
+                    "cost": float(info["cell_cost"]),
+                    "dist": float(info["dist_to_goal"]),
+                    "done": bool(terminated or truncated),
+                }
+            )
+            await asyncio.sleep(delay_s)
+            if terminated or truncated:
+                break
     except WebSocketDisconnect:
         pass

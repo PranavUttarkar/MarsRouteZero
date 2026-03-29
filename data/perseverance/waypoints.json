@@ -1,0 +1,9 @@
+{
+  "label": "Illustrative traverse (grid coordinates on synthetic Jezero — replace with JPL lat/lon for competition)",
+  "points": [
+    { "col": 180, "row": 120 },
+    { "col": 220, "row": 155 },
+    { "col": 260, "row": 190 },
+    { "col": 300, "row": 220 }
+  ]
+}

@@ -1,0 +1,19 @@
+# Local API (Linux/WSL/macOS): mount repo and use a prebuilt libmars under ./build.
+# Windows: prefer running uvicorn on the host; this file is optional.
+#
+#   docker compose run --rm -p 8000:8000 api
+#
+services:
+  api:
+    image: python:3.11-bookworm
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    ports:
+      - "8000:8000"
+    environment:
+      PYTHONPATH: /workspace/build
+      MARS_ELEVATION_BIN: /workspace/data/costmap/jezero_elevation.bin
+    command: >
+      bash -lc "pip install --no-cache-dir -r requirements.txt
+      && uvicorn backend.main:app --host 0.0.0.0 --port 8000"
