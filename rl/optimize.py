@@ -2,19 +2,18 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
-import numpy as np
-import optuna
-from stable_baselines3 import PPO
-from stable_baselines3.common.evaluation import evaluate_policy
-from stable_baselines3.common.env_util import make_vec_env
-
-from rl.mars_env import MarsRoverEnv
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 
 def _make_env_factory(terrain_path: Path, grid_size: int, meters_per_pixel: float):
-    def _factory() -> MarsRoverEnv:
+    def _factory():
+        from rl.mars_env import MarsRoverEnv
+
         return MarsRoverEnv(
             terrain_path=str(terrain_path),
             grid_size=grid_size,
@@ -41,13 +40,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _build_arg_parser().parse_args()
+
+    import numpy as np
+    import optuna
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.evaluation import evaluate_policy
+    from stable_baselines3.common.env_util import make_vec_env
+
     terrain_path = args.terrain_path.resolve()
     if not terrain_path.is_file():
         raise FileNotFoundError(f"Terrain binary not found: {terrain_path}")
 
     env_factory = _make_env_factory(terrain_path, args.grid_size, args.meters_per_pixel)
 
-    def objective(trial: optuna.Trial) -> float:
+    def objective(trial) -> float:
         lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
         n_steps = trial.suggest_categorical("n_steps", [1024, 2048, 4096])
         batch_size = trial.suggest_categorical("batch_size", [128, 256, 512])

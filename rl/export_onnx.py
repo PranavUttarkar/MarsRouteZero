@@ -4,22 +4,20 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import torch
-from stable_baselines3 import PPO
-
-
-class DeterministicPolicyWrapper(torch.nn.Module):
-    """Torch wrapper that exposes deterministic PPO policy actions."""
-
-    def __init__(self, policy: torch.nn.Module):
-        super().__init__()
-        self.policy = policy
-
-    def forward(self, observation: torch.Tensor) -> torch.Tensor:
-        return self.policy._predict(observation, deterministic=True)
-
-
 def export_to_onnx(model_path: Path, output_path: Path, opset: int = 17) -> None:
+    import torch
+    from stable_baselines3 import PPO
+
+    class DeterministicPolicyWrapper(torch.nn.Module):
+        """Torch wrapper that exposes deterministic PPO policy actions."""
+
+        def __init__(self, policy: torch.nn.Module):
+            super().__init__()
+            self.policy = policy
+
+        def forward(self, observation: torch.Tensor) -> torch.Tensor:
+            return self.policy._predict(observation, deterministic=True)
+
     model = PPO.load(str(model_path), device="cpu")
     obs_shape = model.observation_space.shape
     if not obs_shape:

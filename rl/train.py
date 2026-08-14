@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Sequence
 
 _ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 
 def _add_libmars_paths() -> None:
@@ -24,8 +26,6 @@ def _add_libmars_paths() -> None:
 
 
 _add_libmars_paths()
-
-from rl.mars_env import MarsRoverEnv
 
 
 @dataclass(frozen=True)
@@ -84,7 +84,9 @@ def _make_env_factory(
     meters_per_pixel: float,
     random_start_goal: bool = True,
 ):
-    def _factory() -> MarsRoverEnv:
+    def _factory():
+        from rl.mars_env import MarsRoverEnv
+
         return MarsRoverEnv(
             terrain_path=str(terrain_path),
             grid_size=grid_size,
