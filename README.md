@@ -26,6 +26,39 @@ The extension module is built as `libmars` (e.g. `libmars*.so` or `libmars*.pyd`
 
 Optional GeoTIFF loading: configure with `-DMARS_USE_GDAL=ON` and install GDAL dev packages.
 
+## RL (PPO) training
+
+The repository currently implements PPO training utilities under `rl/`.
+
+```bash
+pip install -r requirements.txt
+PYTHONPATH=build python rl/train.py \
+  --terrain-path data/costmap/jezero_elevation.bin \
+  --output-dir models
+```
+
+Outputs:
+- `models/mars_ppo_final.zip` (final policy)
+- `models/checkpoints/` (periodic checkpoints)
+- `models/best/` (best model from eval callback)
+- `models/tensorboard/` (training logs)
+
+Optuna tuning:
+
+```bash
+PYTHONPATH=build python rl/optimize.py \
+  --terrain-path data/costmap/jezero_elevation.bin \
+  --n-trials 20
+```
+
+ONNX export:
+
+```bash
+python rl/export_onnx.py \
+  --model-path models/mars_ppo_final.zip \
+  --output-path frontend/public/mars_policy.onnx
+```
+
 ## Backend and frontend
 
 ```bash

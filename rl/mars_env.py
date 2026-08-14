@@ -1,9 +1,24 @@
 """Gymnasium environment wrapping libmars (build C++ extension first)."""
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
+
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+
+_ROOT = Path(__file__).resolve().parents[1]
+for _extra in (
+    os.environ.get("MARS_LIBMARS_BUILD", ""),
+    str(_ROOT / "build"),
+    str(_ROOT / "build" / "Release"),
+    str(_ROOT / "build" / "Debug"),
+    str(_ROOT / "build" / "RelWithDebInfo"),
+):
+    if _extra and Path(_extra).is_dir() and _extra not in sys.path:
+        sys.path.insert(0, _extra)
 
 import libmars
 
