@@ -43,6 +43,9 @@ def main() -> None:
         clip = trial.suggest_float("clip_range", 0.1, 0.22)
         n_steps = trial.suggest_categorical("n_steps", [512, 1024, 2048])
         gamma = trial.suggest_float("gamma", 0.985, 0.997)
+        gae_lambda = trial.suggest_float("gae_lambda", 0.85, 0.99)
+        batch_size = trial.suggest_categorical("batch_size", [128, 256])
+        n_epochs = trial.suggest_int("n_epochs", 5, 15)
 
         def make_env():
             return MarsRoverEnv(str(args.terrain), args.grid, args.mpp, random_start_goal=True)
@@ -53,10 +56,10 @@ def main() -> None:
             venv,
             learning_rate=lr,
             n_steps=n_steps,
-            batch_size=min(256, n_steps),
-            n_epochs=10,
+            batch_size=min(batch_size, n_steps),
+            n_epochs=n_epochs,
             gamma=gamma,
-            gae_lambda=0.92,
+            gae_lambda=gae_lambda,
             clip_range=clip,
             ent_coef=ent,
             max_grad_norm=0.5,
